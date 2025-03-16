@@ -1,3 +1,11 @@
+## v1.0.2 (2025-03-16)
+
+### 👷 CI/CD
+
+- update package json
+- update workflow
+
+
 ## v1.0.1 (2025-03-16)
 
 
