@@ -56,7 +56,6 @@ class Mod implements IPostDBLoadMod, IPostSptLoadMod
                 return acc;
             }, {});
 
-            // Add the items to the wishlist
             wishlistController.addToWishList(pmcData, { Action: "Add", items: itemsToAdd }, sessionID);
         }
     }
