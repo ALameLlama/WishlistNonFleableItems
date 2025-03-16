@@ -1,0 +1,79 @@
+# Validates PR titles follow conventional commit format
+name: Validate PR Title 🔍
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+
+jobs:
+  validate-pr-title:
+    # Skip validation for release candidate PRs
+    if: "!startsWith(github.event.pull_request.title, 'Release Candidate:')"
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT }}
+
+      - name: Validate PR Title
+        id: pr_title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Define allowed commit types - sync with create-release-candidate.yml categories
+          ALLOWED_TYPES="feat|fix|docs|style|refactor|perf|test|chore|ci|build|revert"
+          # Advanced regex for Conventional Commit format including optional scope and breaking change
+          REGEX="^(${ALLOWED_TYPES})(\([a-zA-Z0-9\-_/.]+\))?(!)?:\s.+"
+
+          create_error_message() {
+            cat << EOF > pr_title_error.txt
+          Invalid PR Title Format 🚨
+
+          Your PR title must follow the Conventional Commit format:
+          \`<type>(<scope>)!?: <description>\`
+
+          Examples:
+          - feat: add new feature
+          - fix(auth): resolve login bug
+          - docs(readme): update installation instructions
+          - refactor!: breaking change in core module
+
+          Allowed types: 
+          - feat: ✨ New features
+          - fix: 🐛 Bug fixes
+          - docs: 📝 Documentation changes
+          - style: 💄 Code formatting
+          - refactor: ♻️ Code restructuring
+          - perf: ⚡ Performance improvements
+          - test: 🤖 Test-related changes
+          - chore: 🔧 Maintenance tasks
+          - ci: 👷 CI/CD pipeline changes
+          - build: 📦 Build system changes
+          - revert: 🔥 Revert previous changes
+
+          Your current title: \`$PR_TITLE\`
+          EOF
+          }
+
+          # Validate PR title
+          if [[ ! "$PR_TITLE" =~ $REGEX ]]; then
+            create_error_message
+            echo "::error file=GITHUB_WORKSPACE/pr_title_error.txt,line=1,title=Invalid PR Title::PR title does not match Conventional Commit format"
+            cat pr_title_error.txt
+            
+            # Comment on PR with the error message
+            gh pr comment $PR_NUMBER --repo $REPO --body "$(cat pr_title_error.txt)"
+            
+            exit 1
+          fi
+

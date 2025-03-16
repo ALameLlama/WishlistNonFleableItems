@@ -1,0 +1,203 @@
+# Creates a release candidate PR with changelog when commits are pushed to main/master
+name: Create Release Candidate 🚀
+
+on:
+  push:
+    branches:
+      - master
+      - main
+
+jobs:
+  create-release-candidate:
+    # Skip if this is a merge of a release candidate PR
+    if: "!contains(github.event.head_commit.message, 'Release Candidate: v')"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for accurate changelog
+          token: ${{ secrets.PAT }}
+
+      - name: Determine Semantic Version
+        id: semver
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          # Get the latest tag or start from 0.0.0
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Latest tag: $LATEST_TAG"
+
+          # Remove 'v' prefix if it exists for version calculation
+          VERSION=${LATEST_TAG#v}
+
+          # Set commit range based on whether we have existing tags
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+              COMMIT_RANGE="HEAD"
+              LAST_TAG=$(git rev-list --max-parents=0 HEAD)
+              echo "No previous tags found, analyzing all commits"
+          else
+              # Get the timestamp of when the tag was created
+              TAG_DATE=$(git log -1 --format=%aI $LATEST_TAG)
+              COMMIT_RANGE="--after='$TAG_DATE'"
+              LAST_TAG=$LATEST_TAG
+              echo "Analyzing commits after $TAG_DATE"
+          fi
+
+          # Store commit data for reuse in changelog
+          mkdir -p .tmp
+          git log $COMMIT_RANGE --merges --pretty=format:"%H" > .tmp/merge_commits.txt
+          git log $COMMIT_RANGE --no-merges --pretty=format:"%H %s" > .tmp/direct_commits.txt
+          echo "Stored commit data for changelog generation"
+
+          # Advanced conventional commit parsing
+          MAJOR_BUMP=$(git log "$COMMIT_RANGE" --pretty=format:"%s" | grep -E "^(feat|fix|refactor|perf)(\([a-zA-Z0-9-]+\))?!:" || true)
+          MINOR_BUMP=$(git log "$COMMIT_RANGE" --pretty=format:"%s" | grep -E "^feat(\([a-zA-Z0-9-]+\))?:" || true)
+
+          # Split version into MAJOR.MINOR.PATCH
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION"
+
+          # Convert empty values to 0
+          MAJOR=${MAJOR:-0}
+          MINOR=${MINOR:-0}
+          PATCH=${PATCH:-0}
+
+          # Determine version bump
+          if [ -n "$MAJOR_BUMP" ]; then
+              echo "Major version bump detected due to breaking changes"
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+          elif [ -n "$MINOR_BUMP" ]; then
+              echo "Minor version bump detected due to new features"
+              MINOR=$((MINOR + 1))
+              PATCH=0
+          else
+              echo "Patch version bump for fixes and updates"
+              PATCH=$((PATCH + 1))
+          fi
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
+          echo "Previous version was $VERSION"
+          echo "New version is $NEW_VERSION"
+
+      - name: Generate Comprehensive Changelog
+        id: changelog
+        run: |
+          # Create temp file for new changes
+          echo "## v${{ env.VERSION }} ($(date '+%Y-%m-%d'))" > .tmp/new_changes.md
+          echo "" >> .tmp/new_changes.md
+
+          # Categories for changelog - sync with validate-pr-title.yml allowed types
+          declare -A categories=(
+            ["feat"]="✨ Features"
+            ["fix"]="🐛 Bug Fixes"
+            ["docs"]="📝 Documentation"
+            ["style"]="💄 Styling"
+            ["refactor"]="♻️  Refactoring"
+            ["perf"]="⚡ Performance"
+            ["test"]="🤖 Tests"
+            ["chore"]="🔧 Chores"
+            ["ci"]="👷 CI/CD"
+            ["build"]="📦 Build"
+            ["revert"]="🔥 Reverts"
+          )
+
+          # Remove type prefix and scope, keep everything after the colon
+          clean_message() {
+            local msg="$1"
+            echo "$msg" | sed -E 's/^[^:]+: *//'
+          }
+
+          # Generate changelog for each category
+          for category in "${!categories[@]}"; do
+            # Array to store all entries for this category
+            ALL_ENTRIES=()
+            
+            # Process merge commits (PRs)
+            while read merge_hash; do
+              if [ ! -z "$merge_hash" ]; then
+                PR_NUMBER=$(git log -1 "$merge_hash" --pretty=format:"%s" | grep -o '#[0-9]\+' | tr -d '#')
+                if [ ! -z "$PR_NUMBER" ]; then
+                  PR_TITLE=$(gh pr view $PR_NUMBER --json title --jq .title)
+                  if [[ "$PR_TITLE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!?:.+ ]]; then
+                    # Check if this is a breaking change
+                    if [[ "$PR_TITLE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!: ]]; then
+                      PREFIX="⛓️‍💥 "
+                    else
+                      PREFIX=""
+                    fi
+                    CLEAN_TITLE=$(clean_message "$PR_TITLE")
+                    ALL_ENTRIES+=("${PREFIX}${CLEAN_TITLE} (#${PR_NUMBER})")
+                  fi
+                fi
+              fi
+            done < .tmp/merge_commits.txt
+            
+            # Process direct commits to master/main
+            while read commit; do
+              if [ ! -z "$commit" ]; then
+                HASH=$(echo "$commit" | cut -d' ' -f1)
+                MESSAGE=$(echo "$commit" | cut -d' ' -f2-)
+                if [[ "$MESSAGE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!?:.+ ]]; then
+                  # Check if this is a breaking change
+                  if [[ "$MESSAGE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!: ]]; then
+                    PREFIX="⛓️‍💥 "
+                  else
+                    PREFIX=""
+                  fi
+                  CLEAN_MESSAGE=$(clean_message "$MESSAGE")
+                  ALL_ENTRIES+=("${PREFIX}${CLEAN_MESSAGE}")
+                fi
+              fi
+            done < .tmp/direct_commits.txt
+            
+            # If we have any entries for this category, write them to the new changes
+            if [ ${#ALL_ENTRIES[@]} -gt 0 ]; then
+              echo "### ${categories[$category]}" >> .tmp/new_changes.md
+              echo "" >> .tmp/new_changes.md
+              
+              # Write all entries
+              for entry in "${ALL_ENTRIES[@]}"; do
+                echo "- $entry" >> .tmp/new_changes.md
+              done
+              
+              echo "" >> .tmp/new_changes.md
+            fi
+          done
+
+          # Combine new changes with existing changelog if it exists
+          if [ -f "CHANGELOG.md" ]; then
+            cat .tmp/new_changes.md > CHANGELOG.new
+            echo "" >> CHANGELOG.new
+            cat CHANGELOG.md >> CHANGELOG.new
+            mv CHANGELOG.new CHANGELOG.md
+          else
+            cat .tmp/new_changes.md > CHANGELOG.md
+          fi
+
+          # Save changelog content as output
+          echo "content<<EOF" >> $GITHUB_OUTPUT
+          cat .tmp/new_changes.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Cleanup Temporary Files
+        run: rm -rf .tmp/
+
+      - name: Create or Update Release Candidate PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.PAT }}
+          branch: release-candidate
+          title: "Release Candidate: v${{ env.VERSION }}"
+          body: |
+            ${{ steps.changelog.outputs.content }}
+          base: ${{ github.event.repository.default_branch }}
+          labels: Release Candidate
+          delete-branch: false
+          commit-message: "chore(release): prepare release candidate v${{ env.VERSION }}"

@@ -1,0 +1,73 @@
+# Creates a GitHub release when a release candidate PR is merged
+name: Finalize Release ⛵
+
+on:
+  pull_request:
+    types:
+      - closed
+
+jobs:
+  create-release:
+    # Only run when a release candidate PR is merged (not just closed)
+    if: >
+      github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.title, 'Release Candidate:')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for changelog
+          token: ${{ secrets.PAT }}
+
+      - name: Extract Version
+        id: extract_version
+        run: |
+          # Extract version from PR title (format: "Release Candidate: v1.1.0")
+          VERSION=$(echo "${{ github.event.pull_request.title }}" | sed -E 's/Release Candidate: v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "Extracted version: $VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Verify Changelog
+        run: |
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "Error: CHANGELOG.md not found"
+            exit 1
+          fi
+          
+          # Changed from "## Release v" to "## v"
+          if ! grep -q "## v${{ env.VERSION }}" CHANGELOG.md; then
+            echo "Error: v${{ env.VERSION }} section not found in CHANGELOG.md"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          npm install
+
+      - name: Run npm build
+        run: |
+          npm run build
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ env.VERSION }}"
+          name: "v${{ env.VERSION }}"
+          body_path: CHANGELOG.md
+          draft: false
+          prerelease: false
+          files: "./dist/alamellama-wishlistnonfleableitems.zip"
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT }}
+
+      - name: Cleanup
+        env:
+          GH_TOKEN: ${{ secrets.PAT }}
+        run: |
+          # Delete the release candidate branch
+          git push origin --delete "${{ github.event.pull_request.head.ref }}" || true
