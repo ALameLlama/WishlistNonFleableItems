@@ -52,7 +52,7 @@ class Mod implements IPostDBLoadMod, IPostSptLoadMod
 
             const itemsToAdd: Record<string, number> = this.nonFleableItems.reduce((acc, item) => 
             {
-                acc[item._id] = 3;
+                acc[item._id] = 4;
                 return acc;
             }, {});
 
