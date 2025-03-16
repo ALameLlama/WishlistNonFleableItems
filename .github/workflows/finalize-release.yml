@@ -45,6 +45,24 @@ jobs:
             exit 1
           fi
 
+      - name: Extract current version from changelog
+        id: extract_changelog
+        run: |
+          # Create a temporary file to store the current version's changelog
+          touch current_version_changelog.md
+
+          # Extract the section for the current version only
+          awk -v version="## v${{ env.VERSION }}" '
+          BEGIN { found=0; }
+          $0 ~ version { found=1; print; next; }
+          /^## v[0-9]+\.[0-9]+\.[0-9]+/ { if (found) exit; }
+          found == 1 { print; }
+          ' CHANGELOG.md > current_version_changelog.md
+
+          # Debug: check the extracted content
+          echo "Extracted changelog content:"
+          cat current_version_changelog.md
+
       - name: Install dependencies
         run: |
           npm install
@@ -53,12 +71,12 @@ jobs:
         run: |
           npm run build
 
-      - name: Upload Release Assets
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ env.VERSION }}"
           name: "v${{ env.VERSION }}"
-          body_path: CHANGELOG.md
+          body_path: current_version_changelog.md
           draft: false
           prerelease: false
           files: "./dist/alamellama-wishlistnonfleableitems.zip"

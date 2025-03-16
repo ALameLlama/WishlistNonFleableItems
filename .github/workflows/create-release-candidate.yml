@@ -9,8 +9,8 @@ on:
 
 jobs:
   create-release-candidate:
-    # Skip if this is a merge of a release candidate PR
-    if: "!contains(github.event.head_commit.message, 'Release Candidate: v')"
+    # Skip if this is a merge of a release candidate PR or any manual release
+    if: "!contains(github.event.head_commit.message, 'Release Candidate: v') && !contains(github.event.head_commit.message, 'release:') && !contains(github.event.head_commit.message, 'chore(release)')"
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,18 +41,19 @@ jobs:
               LAST_TAG=$(git rev-list --max-parents=0 HEAD)
               echo "No previous tags found, analyzing all commits"
           else
-              # Get the timestamp of when the tag was created
-              TAG_DATE=$(git log -1 --format=%aI $LATEST_TAG)
-              COMMIT_RANGE="--after='$TAG_DATE'"
+              # Use tag hash directly instead of date for more accurate commit range
               LAST_TAG=$LATEST_TAG
-              echo "Analyzing commits after $TAG_DATE"
+              COMMIT_RANGE="$LATEST_TAG..HEAD"
+              echo "Analyzing commits between $LATEST_TAG and HEAD"
           fi
 
           # Store commit data for reuse in changelog
           mkdir -p .tmp
-          git log $COMMIT_RANGE --merges --pretty=format:"%H" > .tmp/merge_commits.txt
-          git log $COMMIT_RANGE --no-merges --pretty=format:"%H %s" > .tmp/direct_commits.txt
-          echo "Stored commit data for changelog generation"
+          git log "$COMMIT_RANGE" --merges --pretty=format:"%H" > .tmp/merge_commits.txt
+          git log "$COMMIT_RANGE" --no-merges --pretty=format:"%H %s" > .tmp/direct_commits.txt
+
+          echo "Commits to analyze:"
+          cat .tmp/direct_commits.txt
 
           # Advanced conventional commit parsing
           MAJOR_BUMP=$(git log "$COMMIT_RANGE" --pretty=format:"%s" | grep -E "^(feat|fix|refactor|perf)(\([a-zA-Z0-9-]+\))?!:" || true)
@@ -81,6 +82,13 @@ jobs:
               PATCH=$((PATCH + 1))
           fi
 
+          # Validate version components are numeric
+          if ! [[ "$MAJOR" =~ ^[0-9]+$ ]] || ! [[ "$MINOR" =~ ^[0-9]+$ ]] || ! [[ "$PATCH" =~ ^[0-9]+$ ]]; then
+              echo "Error: Invalid version components. Using fallback version bump."
+              # Fallback to patch bump
+              PATCH=$((PATCH + 1))
+          fi
+
           NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
           echo "VERSION=$NEW_VERSION" >> $GITHUB_ENV
           echo "Previous version was $VERSION"
@@ -93,13 +101,15 @@ jobs:
           echo "## v${{ env.VERSION }} ($(date '+%Y-%m-%d'))" > .tmp/new_changes.md
           echo "" >> .tmp/new_changes.md
 
-          # Categories for changelog - sync with validate-pr-title.yml allowed types
-          declare -A categories=(
+          echo "### Generating changelog from commits..."
+
+          # Define categories
+          declare -A CATEGORIES=(
             ["feat"]="✨ Features"
             ["fix"]="🐛 Bug Fixes"
             ["docs"]="📝 Documentation"
             ["style"]="💄 Styling"
-            ["refactor"]="♻️  Refactoring"
+            ["refactor"]="♻️ Refactoring"
             ["perf"]="⚡ Performance"
             ["test"]="🤖 Tests"
             ["chore"]="🔧 Chores"
@@ -108,63 +118,71 @@ jobs:
             ["revert"]="🔥 Reverts"
           )
 
-          # Remove type prefix and scope, keep everything after the colon
-          clean_message() {
-            local msg="$1"
-            echo "$msg" | sed -E 's/^[^:]+: *//'
-          }
+          # Get all commits since last tag
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+              COMMIT_RANGE="HEAD"
+          else
+              COMMIT_RANGE="$LATEST_TAG..HEAD"
+          fi
 
-          # Generate changelog for each category
-          for category in "${!categories[@]}"; do
-            # Array to store all entries for this category
-            ALL_ENTRIES=()
+          echo "Commit range: $COMMIT_RANGE"
+
+          # Process commits by category
+          for CATEGORY in "${!CATEGORIES[@]}"; do
+            echo "Processing $CATEGORY commits..."
             
-            # Process merge commits (PRs)
-            while read merge_hash; do
-              if [ ! -z "$merge_hash" ]; then
-                PR_NUMBER=$(git log -1 "$merge_hash" --pretty=format:"%s" | grep -o '#[0-9]\+' | tr -d '#')
+            # Get both direct commits and merge commits matching this category
+            # Direct commits
+            DIRECT_COMMITS=$(git log "$COMMIT_RANGE" --no-merges --pretty=format:"%H %s" | grep -E "^[a-f0-9]+ ${CATEGORY}(\([a-zA-Z0-9-]+\))?!?:" || true)
+            
+            # Process PRs for this category
+            PR_COMMITS=""
+            while read -r MERGE_HASH; do
+              if [ ! -z "$MERGE_HASH" ]; then
+                PR_NUMBER=$(git log -1 "$MERGE_HASH" --pretty=format:"%s" | grep -o '#[0-9]\+' | tr -d '#' || true)
                 if [ ! -z "$PR_NUMBER" ]; then
-                  PR_TITLE=$(gh pr view $PR_NUMBER --json title --jq .title)
-                  if [[ "$PR_TITLE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!?:.+ ]]; then
-                    # Check if this is a breaking change
-                    if [[ "$PR_TITLE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!: ]]; then
-                      PREFIX="⛓️‍💥 "
-                    else
-                      PREFIX=""
-                    fi
-                    CLEAN_TITLE=$(clean_message "$PR_TITLE")
-                    ALL_ENTRIES+=("${PREFIX}${CLEAN_TITLE} (#${PR_NUMBER})")
+                  PR_TITLE=$(gh pr view "$PR_NUMBER" --json title --jq .title 2>/dev/null || echo "")
+                  if [[ "$PR_TITLE" =~ ^${CATEGORY}(\([a-zA-Z0-9-]+\))?!?:.+ ]]; then
+                    PR_COMMITS="${PR_COMMITS}${MERGE_HASH} ${PR_TITLE} (#${PR_NUMBER})"
                   fi
                 fi
               fi
-            done < .tmp/merge_commits.txt
+            done < <(git log "$COMMIT_RANGE" --merges --pretty=format:"%H")
             
-            # Process direct commits to master/main
-            while read commit; do
-              if [ ! -z "$commit" ]; then
-                HASH=$(echo "$commit" | cut -d' ' -f1)
-                MESSAGE=$(echo "$commit" | cut -d' ' -f2-)
-                if [[ "$MESSAGE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!?:.+ ]]; then
+            # Combine all commits for this category
+            ALL_COMMITS="${DIRECT_COMMITS}${PR_COMMITS}"
+            
+            # If we have any entries for this category, write them to the new changes
+            if [ ! -z "$ALL_COMMITS" ]; then
+              echo "Found commits for $CATEGORY"
+              echo "### ${CATEGORIES[$CATEGORY]}" >> .tmp/new_changes.md
+              echo "" >> .tmp/new_changes.md
+              
+              # Process each commit
+              echo "$ALL_COMMITS" | while read -r COMMIT; do
+                if [ ! -z "$COMMIT" ]; then
+                  HASH=$(echo "$COMMIT" | cut -d' ' -f1)
+                  MESSAGE=$(echo "$COMMIT" | cut -d' ' -f2-)
+                  
+                  # Clean message (remove category prefix)
+                  CLEAN_MESSAGE=$(echo "$MESSAGE" | sed -E "s/^${CATEGORY}(\([a-zA-Z0-9-]+\))?!?: //")
+                  
                   # Check if this is a breaking change
-                  if [[ "$MESSAGE" =~ ^${category}(\([a-zA-Z0-9-]+\))?!: ]]; then
+                  if [[ "$MESSAGE" =~ ^${CATEGORY}(\([a-zA-Z0-9-]+\))?!: ]]; then
                     PREFIX="⛓️‍💥 "
                   else
                     PREFIX=""
                   fi
-                  CLEAN_MESSAGE=$(clean_message "$MESSAGE")
-                  ALL_ENTRIES+=("${PREFIX}${CLEAN_MESSAGE}")
+                  
+                  # Check if this has a PR number already
+                  if [[ "$CLEAN_MESSAGE" =~ \(#[0-9]+\)$ ]]; then
+                    echo "- ${PREFIX}${CLEAN_MESSAGE}" >> .tmp/new_changes.md
+                  else
+                    # Format the commit message with hash
+                    echo "- ${PREFIX}${CLEAN_MESSAGE}" >> .tmp/new_changes.md
+                  fi
                 fi
-              fi
-            done < .tmp/direct_commits.txt
-            
-            # If we have any entries for this category, write them to the new changes
-            if [ ${#ALL_ENTRIES[@]} -gt 0 ]; then
-              echo "### ${categories[$category]}" >> .tmp/new_changes.md
-              echo "" >> .tmp/new_changes.md
-              
-              # Write all entries
-              for entry in "${ALL_ENTRIES[@]}"; do
-                echo "- $entry" >> .tmp/new_changes.md
               done
               
               echo "" >> .tmp/new_changes.md
@@ -180,6 +198,10 @@ jobs:
           else
             cat .tmp/new_changes.md > CHANGELOG.md
           fi
+
+          # Output the changelog content
+          echo "Generated changelog content:"
+          cat .tmp/new_changes.md
 
           # Save changelog content as output
           echo "content<<EOF" >> $GITHUB_OUTPUT
