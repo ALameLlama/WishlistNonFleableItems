@@ -15,18 +15,18 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Full history for accurate changelog
-          token: ${{ secrets.PAT }}
 
       - name: Determine Semantic Version
         id: semver
         env:
-          GH_TOKEN: ${{ secrets.PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Get the latest tag or start from 0.0.0
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
@@ -214,7 +214,7 @@ jobs:
       - name: Create or Update Release Candidate PR
         uses: peter-evans/create-pull-request@v7
         with:
-          token: ${{ secrets.PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           branch: release-candidate
           title: "Release Candidate: v${{ env.VERSION }}"
           body: |

@@ -19,8 +19,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.PAT }}
 
       - name: Validate PR Title
         id: pr_title
@@ -72,7 +70,7 @@ jobs:
             cat pr_title_error.txt
             
             # Comment on PR with the error message
-            gh pr comment $PR_NUMBER --repo $REPO --body "$(cat pr_title_error.txt)"
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$(cat pr_title_error.txt)"
             
             exit 1
           fi

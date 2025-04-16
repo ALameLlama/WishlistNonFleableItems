@@ -22,7 +22,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Full history for changelog
-          token: ${{ secrets.PAT }}
 
       - name: Extract Version
         id: extract_version
@@ -98,11 +97,11 @@ jobs:
           prerelease: false
           files: "./dist/alamellama-wishlistnonfleableitems.zip"
         env:
-          GITHUB_TOKEN: ${{ secrets.PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cleanup
         env:
-          GH_TOKEN: ${{ secrets.PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Delete the release candidate branch
           git push origin --delete "${{ github.event.pull_request.head.ref }}" || true
